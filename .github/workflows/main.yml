@@ -28,13 +28,27 @@ jobs:
         run: |
           src=$(/usr/bin/curl -Lfs https://raw.githubusercontent.com/acidanthera/ocbuild/master/ci-bootstrap.sh) && eval "$src" || exit 1
 
+      - name: Verify patch markers in source
+        run: |
+          git show --stat --oneline 3bd42cdf4a9465aebf1c9f811032e845abeb8bdd
+          grep -n "encodedClockDiv" EmeraldSDHC/EmeraldSDHCSlot.cpp
+          grep -n "tuningLoops" EmeraldSDHC/EmeraldSDHCBlockStorageDeviceCard.cpp
+
       - run: xcodebuild -jobs 1 -configuration Debug -arch x86_64
       - run: xcodebuild -jobs 1 -configuration Release -arch x86_64
+
+      - name: Verify patch markers in DEBUG binary
+        run: |
+          cd build/Debug
+          strings EmeraldSDHC.kext/Contents/MacOS/EmeraldSDHC | grep "Clock request"
+          strings EmeraldSDHC.kext/Contents/MacOS/EmeraldSDHC | grep "after %u loops"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' EmeraldSDHC.kext/Contents/Info.plist)" = "0.1.5"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' ../Release/EmeraldSDHC.kext/Contents/Info.plist)" = "0.1.5"
 
       - name: Upload to Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Artifacts
+          name: EmeraldSDHC-0.1.5-patched
           path: build/*/*.zip
       - name: Upload to Release
         if: github.event_name == 'release'
