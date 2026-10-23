@@ -223,8 +223,9 @@ bool EmeraldSDHCSlot::setControllerClock(UInt32 speedHz) {
   //
   // Set clock divisor and start SD clock.
   //
-  UInt16 newClockDiv = ((clockDiv << kSDHCRegClockControlFreqSelectLowShift) & kSDHCRegClockControlFreqSelectLowMask)
-    | ((clockDiv >> kSDHCRegClockControlFreqSelectHighRhShift) & kSDHCRegClockControlFreqSelectHighMask);
+  UInt32 encodedClockDiv = clockDiv >> 1;
+  UInt16 newClockDiv = ((encodedClockDiv << kSDHCRegClockControlFreqSelectLowShift) & kSDHCRegClockControlFreqSelectLowMask)
+    | ((encodedClockDiv >> kSDHCRegClockControlFreqSelectHighRhShift) & kSDHCRegClockControlFreqSelectHighMask);
   writeReg16(kSDHCRegClockControl, readReg16(kSDHCRegClockControl) | newClockDiv);
   writeReg16(kSDHCRegClockControl, readReg16(kSDHCRegClockControl) | kSDHCRegClockControlSDClockEnable);
   EMDBGLOG("Clock control register is now 0x%X", readReg16(kSDHCRegClockControl));

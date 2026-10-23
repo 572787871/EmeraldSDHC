@@ -569,7 +569,7 @@ bool EmeraldSDHCBlockStorageDevice::switchMMCSpeed() {
 }
 
 bool EmeraldSDHCBlockStorageDevice::tuneCard(SDABusWidth busWidth) {
-  bool tuningComplete = true;
+  bool tuningComplete = false;
 
   UInt16 bytesLength = 0;
   if (busWidth == kSDABusWidth4) {
@@ -594,12 +594,17 @@ bool EmeraldSDHCBlockStorageDevice::tuneCard(SDABusWidth busWidth) {
   //
   EMDBGLOG("Starting tuning of card using %u bytes", bytesLength);
   _cardSlot->writeReg16(kSDHCRegHostControl2, _cardSlot->readReg16(kSDHCRegHostControl2) | kSDHCRegHostControl2ExecuteTuning);
-  while (_cardSlot->readReg16(kSDHCRegHostControl2) & kSDHCRegHostControl2ExecuteTuning) {
+  for (UInt32 tuningAttempt = 0; tuningAttempt < 40; tuningAttempt++) {
+    if (!(_cardSlot->readReg16(kSDHCRegHostControl2) & kSDHCRegHostControl2ExecuteTuning)) {
+      break;
+    }
     if (doSyncCommandWithData(kMMCCommandSendTuningBlock, 0, kSDATimeout_10sec, 1, bytesLength, bufDescriptor, 0) != kIOReturnSuccess) {
-      tuningComplete = false;
       break;
     }
   }
+  UInt16 hostControl2 = _cardSlot->readReg16(kSDHCRegHostControl2);
+  tuningComplete = !(hostControl2 & kSDHCRegHostControl2ExecuteTuning)
+    && (hostControl2 & kSDHCRegHostControl2SamplingClockSelect);
   EMDBGLOG("Tuning complete: %u", tuningComplete); // TODO: handle tuning error interrupts?
 
   bufDescriptor->complete();
