@@ -20,6 +20,8 @@ jobs:
       JOB_TYPE: BUILD
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/checkout@v4
         with:
           repository: acidanthera/MacKernelSDK
@@ -30,7 +32,7 @@ jobs:
 
       - name: Verify patch markers in source
         run: |
-          git show --stat --oneline 3bd42cdf4a9465aebf1c9f811032e845abeb8bdd
+          git diff --stat 744126c3540f568a60d9b3d2ff63b88291c37ce7...3bd42cdf4a9465aebf1c9f811032e845abeb8bdd
           grep -n "encodedClockDiv" EmeraldSDHC/EmeraldSDHCSlot.cpp
           grep -n "tuningLoops" EmeraldSDHC/EmeraldSDHCBlockStorageDeviceCard.cpp
 
