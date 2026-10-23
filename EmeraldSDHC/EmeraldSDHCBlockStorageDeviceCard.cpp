@@ -422,6 +422,8 @@ bool EmeraldSDHCBlockStorageDevice::parseMMCExtendedCSD() {
   _cardBlockCount = _mmcExtendedCSD.sectorCount;
 
   EMDBGLOG("Card type: 0x%X, driver strengths: 0x%X", _mmcExtendedCSD.deviceType, _mmcExtendedCSD.driverStrength);
+  EMDBGLOG("Current MMC mode: BUS_WIDTH=0x%X HS_TIMING=0x%X", _mmcExtendedCSD.busWidth,
+           _mmcExtendedCSD.hsTiming & 0x0F);
   EMDBGLOG("CSD version: 0x%X, ExtCSD version: 0x%X", _mmcExtendedCSD.csdStructure, _mmcExtendedCSD.extendedCSDRevision);
   EMDBGLOG("Block count: %u (%llu bytes), high capacity: %u", _cardBlockCount, (UInt64)_cardBlockCount * kSDABlockSize, _isCardHighCapacity);
   return true;
@@ -515,36 +517,102 @@ bool EmeraldSDHCBlockStorageDevice::switchMMCExtendedCSD(MMCSwitchAccessBits acc
   UInt32 arg = ((access << kMMCSwitchAccessShift) & kMMCSwitchAccessMask)
     | ((index << kMMCSwitchIndexShift) & kMMCSwitchIndexMask)
     | ((value << kMMCSwitchValueShift) & kMMCSwitchValueMask);
-  return doSyncCommand(kMMCCommandSwitch, arg, kSDATimeout_10sec) == kIOReturnSuccess;
+  return doSyncCommand(kMMCCommandSwitch, arg, kSDATimeout_10sec) == kIOReturnSuccess && checkMMCStatus();
+}
+
+bool EmeraldSDHCBlockStorageDevice::checkMMCStatus() {
+  SDACommandResponse response = { };
+  if (doSyncCommand(kMMCCommandSendStatus, _cardAddress << kSDARelativeAddressShift,
+                    kSDATimeout_10sec, &response) != kIOReturnSuccess) {
+    EMSYSLOG("Failed to read MMC status");
+    return false;
+  }
+
+  UInt32 status = response.bytes4[0];
+  UInt32 state = (status & kMMCStatusCurrentStateMask) >> kMMCStatusCurrentStateShift;
+  UInt32 errors = status & (kMMCStatusErrorMask | kMMCStatusSwitchError);
+  EMDBGLOG("MMC status 0x%08X state %u errors 0x%08X", status, state, errors);
+  if (errors != 0 || (status & kMMCStatusReadyForData) == 0 || state != kMMCStatusStateTransfer) {
+    EMSYSLOG("MMC status rejected timing switch: status 0x%08X", status);
+    return false;
+  }
+  return true;
+}
+
+bool EmeraldSDHCBlockStorageDevice::switchMMCHS200() {
+  if (!_cardSlot->setControllerSignalVoltage1_8()) {
+    return false;
+  }
+  if (!setCardBusWidth(kSDABusWidth8, false)) {
+    EMSYSLOG("Failed to set the MMC bus to 8-bit SDR for HS200");
+    return false;
+  }
+  if (!setMMCSpeed(kMMCTimingSpeedHS200)) {
+    EMSYSLOG("Failed to select MMC HS200 timing");
+    return false;
+  }
+  if (!_cardSlot->setControllerClock(200 * MHz)) {
+    return false;
+  }
+  if (!tuneCard(kSDABusWidth8)) {
+    EMSYSLOG("HS200 tuning failed");
+    return false;
+  }
+
+  UInt32 actualClock = _cardSlot->getControllerClock();
+  if (actualClock <= kSDAMMCHighSpeedClock52MHz || actualClock > (200 * MHz)) {
+    EMSYSLOG("HS200 clock verification failed: %u Hz", actualClock);
+    return false;
+  }
+  if (!parseMMCExtendedCSD()
+      || _mmcExtendedCSD.busWidth != kMMCBusWidth8Bit
+      || (_mmcExtendedCSD.hsTiming & 0x0F) != kMMCTimingSpeedHS200) {
+    EMSYSLOG("HS200 EXT_CSD readback failed: BUS_WIDTH=0x%X HS_TIMING=0x%X",
+             _mmcExtendedCSD.busWidth, _mmcExtendedCSD.hsTiming & 0x0F);
+    return false;
+  }
+
+  setProperty("EmeraldSDHCTimingMode", "HS200");
+  setProperty("EmeraldSDHCClockHz", actualClock, 32);
+  EMSYSLOG("HS200 active: 8-bit SDR at %u Hz", actualClock);
+  return true;
+}
+
+bool EmeraldSDHCBlockStorageDevice::switchMMCHighSpeed() {
+  if (!_cardSlot->setControllerClock(_mmcMaxStandardClock)) {
+    return false;
+  }
+
+  UInt64 hostCaps = _cardSlot->getControllerCapabilities();
+  bool use8Bit = (hostCaps & kSDHCRegCapabilitiesEmbedded8BitSupported) != 0;
+  if (!setCardBusWidth(use8Bit ? kSDABusWidth8 : kSDABusWidth1, false)) {
+    return false;
+  }
+
+  bool useHighSpeed = (hostCaps & kSDHCRegCapabilitiesHighSpeedSupported) != 0
+    && (_mmcExtendedCSD.deviceType & kMMCDeviceTypeHighSpeed_52MHz) != 0;
+  if (!setMMCSpeed(useHighSpeed ? kMMCTimingSpeedHighSpeed : kMMCTimingSpeedDefault)) {
+    return false;
+  }
+
+  UInt32 targetClock = useHighSpeed ? kSDAMMCHighSpeedClock52MHz : _mmcMaxStandardClock;
+  if (!_cardSlot->setControllerClock(targetClock)) {
+    return false;
+  }
+  UInt32 actualClock = _cardSlot->getControllerClock();
+  setProperty("EmeraldSDHCTimingMode", useHighSpeed ? "HighSpeed" : "Legacy");
+  setProperty("EmeraldSDHCClockHz", actualClock, 32);
+  EMSYSLOG("MMC fallback active: %s at %u Hz", useHighSpeed ? "HighSpeed" : "Legacy", actualClock);
+  return true;
 }
 
 bool EmeraldSDHCBlockStorageDevice::switchMMCSpeed() {
-  /*SDABusWidth busWidth;
-  MMCTimingSpeed speed;
-
-  //
-  // Set speed to max supported.
-  //
-  if (_mmcExtendedCSD.deviceType & (kMMCDeviceTypeHS400_DDR_1_2V | kMMCDeviceTypeHS400_DDR_1_8V)) {
-    busWidth = kSDABusWidth8;
-    speed = kMMCTimingSpeedHS200;
-  } else if (_mmcExtendedCSD.deviceType & (kMMCDeviceTypeHS200_SDR_1_2V | kMMCDeviceTypeHS200_SDR_1_8V)) {
-    busWidth = kSDABusWidth8;
-    speed = kMMCTimingSpeedHS200;
-  } else if (_mmcExtendedCSD.deviceType & (kMMCDeviceTypeHighSpeed_DDR_52MHz_1_2V | kMMCDeviceTypeHighSpeed_DDR_52MHz_1_8V_3V)) {
-    
-  }*/
-
-  setCardBusWidth(kSDABusWidth8, false);
-
-  setMMCSpeed(kMMCTimingSpeedHS200);
-  _cardSlot->setControllerClock(200 * MHz);
-  
-  tuneCard(kSDABusWidth8);
-
-  
   UInt64 hostCaps = _cardSlot->getControllerCapabilities();
-  EMDBGLOG("Host controller slot capabilities: 0x%llX", hostCaps);
+  UInt8 cardType = _mmcExtendedCSD.deviceType;
+  bool hostHS200 = _cardSlot->supportsHS200();
+  bool cardHS200 = (cardType & kMMCDeviceTypeHS200_SDR_1_8V) != 0;
+  EMDBGLOG("Host capabilities: 0x%llX, card DEVICE_TYPE: 0x%X, host HS200: %u, card HS200 1.8V: %u",
+           hostCaps, cardType, hostHS200, cardHS200);
 
   //
   // Determine DMA support level.
@@ -559,17 +627,21 @@ bool EmeraldSDHCBlockStorageDevice::switchMMCSpeed() {
     EMDBGLOG("No DMA support, using PIO");
     _hcTransferType = kSDATransferTypePIO;
   }
-  EMDBGLOG("No DMA support, using PIO");
   _cardSlot->setControllerDMAMode(_hcTransferType);
-  
-  memset(&_mmcExtendedCSD, 0, sizeof (_mmcExtendedCSD));
-  parseMMCExtendedCSD();
 
-  return true;
+  if (hostHS200 && cardHS200) {
+    if (switchMMCHS200()) {
+      return true;
+    }
+    EMSYSLOG("HS200 transition failed; lowering the clock and falling back safely");
+  } else {
+    EMSYSLOG("HS200 not attempted: host=%u card=%u", hostHS200, cardHS200);
+  }
+  return switchMMCHighSpeed();
 }
 
 bool EmeraldSDHCBlockStorageDevice::tuneCard(SDABusWidth busWidth) {
-  bool tuningComplete = true;
+  bool tuningComplete = false;
 
   UInt16 bytesLength = 0;
   if (busWidth == kSDABusWidth4) {
@@ -594,13 +666,26 @@ bool EmeraldSDHCBlockStorageDevice::tuneCard(SDABusWidth busWidth) {
   //
   EMDBGLOG("Starting tuning of card using %u bytes", bytesLength);
   _cardSlot->writeReg16(kSDHCRegHostControl2, _cardSlot->readReg16(kSDHCRegHostControl2) | kSDHCRegHostControl2ExecuteTuning);
-  while (_cardSlot->readReg16(kSDHCRegHostControl2) & kSDHCRegHostControl2ExecuteTuning) {
+  static const UInt32 maxTuningLoops = 40;
+  UInt32 tuningLoops = 0;
+  while (tuningLoops < maxTuningLoops) {
+    tuningLoops++;
     if (doSyncCommandWithData(kMMCCommandSendTuningBlock, 0, kSDATimeout_10sec, 1, bytesLength, bufDescriptor, 0) != kIOReturnSuccess) {
-      tuningComplete = false;
+      break;
+    }
+    UInt16 hcControl2 = _cardSlot->readReg16(kSDHCRegHostControl2);
+    if ((hcControl2 & kSDHCRegHostControl2ExecuteTuning) == 0) {
+      tuningComplete = (hcControl2 & kSDHCRegHostControl2SamplingClockSelect) != 0;
       break;
     }
   }
-  EMDBGLOG("Tuning complete: %u", tuningComplete); // TODO: handle tuning error interrupts?
+  UInt16 hcControl2 = _cardSlot->readReg16(kSDHCRegHostControl2);
+  if (!tuningComplete) {
+    hcControl2 &= ~(kSDHCRegHostControl2ExecuteTuning | kSDHCRegHostControl2SamplingClockSelect);
+    _cardSlot->writeReg16(kSDHCRegHostControl2, hcControl2);
+  }
+  EMDBGLOG("Tuning complete: %u after %u loops, HC2=0x%X", tuningComplete, tuningLoops,
+           _cardSlot->readReg16(kSDHCRegHostControl2));
 
   bufDescriptor->complete();
   bufDescriptor->release();
@@ -614,7 +699,8 @@ bool EmeraldSDHCBlockStorageDevice::setMMCSpeed(MMCTimingSpeed speed) {
   //
   EMDBGLOG("Host controller slot capabilities: 0x%llX", _cardSlot->readReg64(kSDHCRegCapabilities));
   EMDBGLOG("Setting MMC speed to 0x%X", speed);
-  if (!switchMMCExtendedCSD (kMMCSwitchAccessWriteByte, __offsetof(MMCExtendedCSDRegister, hsTiming), (1 << kMMCHSTimingDriverStrengthShift) | speed)) { // TODO: Driver strength defaults to B in the host controller, setting that here for now.
+  // Driver type B is encoded as zero and matches the controller default.
+  if (!switchMMCExtendedCSD(kMMCSwitchAccessWriteByte, __offsetof(MMCExtendedCSDRegister, hsTiming), speed)) {
     return false;
   }
 
@@ -633,14 +719,14 @@ bool EmeraldSDHCBlockStorageDevice::setMMCSpeed(MMCTimingSpeed speed) {
   // Set host control 2 register for HS200 and HS400 modes.
   //
   UInt16 hcControl2 = _cardSlot->readReg16(kSDHCRegHostControl2);
-  hcControl2 &= ~(kSDHCRegHostControl21_8VSignaling | kSDHCRegHostControl2UHS_Mask);
+  hcControl2 &= ~kSDHCRegHostControl2UHS_Mask;
   if (speed == kMMCTimingSpeedHS200) {
     hcControl2 |= kSDHCRegHostControl21_8VSignaling | kSDHCRegHostControl2UHS_SDR104;
   } else if (speed == kMMCTimingSpeedHS400) {
     hcControl2 |= kSDHCRegHostControl21_8VSignaling | kSDHCRegHostControl2UHS_HS400;
     // TODO: Support HS400 on the host controller side.
-  } else {
-   // hcControl2 &= ~(kSDHCRegHostControl21_8VSignaling | kSDHCRegHostControl2UHS_Mask);
+  } else if (speed == kMMCTimingSpeedDefault) {
+    hcControl2 &= ~kSDHCRegHostControl21_8VSignaling;
   }
   _cardSlot->writeReg16(kSDHCRegHostControl2, hcControl2);
   IOSleep(50);
@@ -708,7 +794,13 @@ bool EmeraldSDHCBlockStorageDevice::initCard() {
     
   } else {
     if (isExtendedCSDSupported()) {
-      switchMMCSpeed();
+      if (!switchMMCSpeed()) {
+        EMSYSLOG("Failed to select a verified MMC timing mode");
+        _cardSlot->setControllerPower(false);
+        _cardSlot->setControllerClock(0);
+        _isCardInserted = false;
+        return false;
+      }
     }
   }
 

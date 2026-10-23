@@ -172,6 +172,8 @@
 #define kSDHCRegCapabilitiesVoltage3_0Supported   BIT25
 #define kSDHCRegCapabilitiesVoltage1_8Supported   BIT26
 #define kSDHCRegCapabilitiesSlotTypeEmbedded      BIT30
+// CAPABILITIES_1 occupies the upper half of the 64-bit capability value.
+#define kSDHCRegCapabilitiesSDR104Supported        (1ULL << 33)
 
 #define kSDHCRegMaxCurrentCapabilities  0x48
 
@@ -203,6 +205,14 @@
 #define kSDAOCRCCSHighCapacity    BIT30
 #define kSDAOCRCardBusy           BIT31
 #define kSDAOCRInitValue          (kSDAOCRCCSHighCapacity | 0xFF8000)
+
+// MMC R1 status fields used to validate timing-mode switches.
+#define kMMCStatusErrorMask         0xFFF9A000U
+#define kMMCStatusReadyForData      BIT8
+#define kMMCStatusSwitchError       BIT7
+#define kMMCStatusCurrentStateMask  0x00001E00U
+#define kMMCStatusCurrentStateShift 9
+#define kMMCStatusStateTransfer     4
 
 //
 // SD Host Controller versions.

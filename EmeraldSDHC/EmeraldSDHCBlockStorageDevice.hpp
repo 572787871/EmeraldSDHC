@@ -146,7 +146,10 @@ private:
   bool parseSDSCR();
   bool setCardBusWidth(SDABusWidth busWidth, bool doubleDataRate);
   bool switchMMCExtendedCSD(MMCSwitchAccessBits access, UInt8 index, UInt8 value);
+  bool checkMMCStatus();
   bool switchMMCSpeed();
+  bool switchMMCHS200();
+  bool switchMMCHighSpeed();
   bool tuneCard(SDABusWidth busWidth);
   bool setMMCSpeed(MMCTimingSpeed speed);
   bool initCard();

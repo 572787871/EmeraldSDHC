@@ -194,13 +194,6 @@ bool EmeraldSDHCSlot::setControllerClock(UInt32 speedHz) {
     return true;
   }
 
-  writeReg16(kSDHCRegClockControl, readReg16(kSDHCRegClockControl) | kSDHCRegClockControlIntClockEnable);
-  if (!waitForBits16(kSDHCRegClockControl, kSDHCRegClockControlIntClockStable, false, false)) {
-    EMSYSLOG("Host controller timed out during clock startup");
-    return false;
-  }
-  EMDBGLOG("Clock is now stable");
-
   //
   // Get base clock speed.
   //
@@ -210,26 +203,97 @@ bool EmeraldSDHCSlot::setControllerClock(UInt32 speedHz) {
     (hcCaps & kSDHCRegCapabilitiesBaseClockMaskVer1) >> kSDHCRegCapabilitiesBaseClockShift;
   baseClock *= MHz;
   EMDBGLOG("Base clock is %u MHz", baseClock / MHz);
+  if (baseClock == 0) {
+    EMSYSLOG("Host controller reported an invalid base clock");
+    return false;
+  }
 
   //
-  // Calculate clock divisor.
+  // Calculate the real divisor. SDHCI 3.0 supports any even divisor, while
+  // older controllers only support powers of two. A divisor of one selects
+  // the base clock directly.
   //
-  UInt32 clockDiv;
-  for (clockDiv = 1; (baseClock / clockDiv) > speedHz; clockDiv <<= 1);
+  UInt32 clockDiv = 1;
+  if (getControllerVersion() >= kSDHostControllerVersion3_00) {
+    if (baseClock > speedHz) {
+      for (clockDiv = 2; clockDiv < 2046 && (baseClock / clockDiv) > speedHz; clockDiv += 2);
+    }
+  } else {
+    for (clockDiv = 1; clockDiv < 256 && (baseClock / clockDiv) > speedHz; clockDiv <<= 1);
+  }
+  UInt32 actualClock = baseClock / clockDiv;
   EMDBGLOG("Clock will be set to %u %s using divisor %u",
-           speedHz >= MHz ? (baseClock / clockDiv) / MHz : (baseClock / clockDiv) / kHz,
+           speedHz >= MHz ? actualClock / MHz : actualClock / kHz,
            speedHz >= MHz ? "MHz" : "kHz", clockDiv);
 
   //
-  // Set clock divisor and start SD clock.
+  // SDHCI stores half of the real divisor. Program it before enabling the
+  // internal clock, wait for stability, and only then start the card clock.
   //
-  UInt16 newClockDiv = ((clockDiv << kSDHCRegClockControlFreqSelectLowShift) & kSDHCRegClockControlFreqSelectLowMask)
-    | ((clockDiv >> kSDHCRegClockControlFreqSelectHighRhShift) & kSDHCRegClockControlFreqSelectHighMask);
-  writeReg16(kSDHCRegClockControl, readReg16(kSDHCRegClockControl) | newClockDiv);
+  UInt32 encodedClockDiv = clockDiv >> 1;
+  UInt16 clockControl = ((encodedClockDiv << kSDHCRegClockControlFreqSelectLowShift) & kSDHCRegClockControlFreqSelectLowMask);
+  if (getControllerVersion() >= kSDHostControllerVersion3_00) {
+    clockControl |= ((encodedClockDiv >> kSDHCRegClockControlFreqSelectHighRhShift) & kSDHCRegClockControlFreqSelectHighMask);
+  }
+  clockControl |= kSDHCRegClockControlIntClockEnable;
+  writeReg16(kSDHCRegClockControl, clockControl);
+  if (!waitForBits16(kSDHCRegClockControl, kSDHCRegClockControlIntClockStable, false, false)) {
+    EMSYSLOG("Host controller timed out during clock startup");
+    return false;
+  }
+  EMDBGLOG("Clock is now stable");
+
   writeReg16(kSDHCRegClockControl, readReg16(kSDHCRegClockControl) | kSDHCRegClockControlSDClockEnable);
   EMDBGLOG("Clock control register is now 0x%X", readReg16(kSDHCRegClockControl));
   IOSleep(50);
 
+  return true;
+}
+
+UInt32 EmeraldSDHCSlot::getControllerClock() {
+  UInt64 hcCaps    = readReg64(kSDHCRegCapabilities);
+  UInt32 baseClock = getControllerVersion() >= kSDHostControllerVersion3_00 ?
+    (hcCaps & kSDHCRegCapabilitiesBaseClockMaskVer3) >> kSDHCRegCapabilitiesBaseClockShift :
+    (hcCaps & kSDHCRegCapabilitiesBaseClockMaskVer1) >> kSDHCRegCapabilitiesBaseClockShift;
+  UInt16 clockControl = readReg16(kSDHCRegClockControl);
+  UInt32 encodedClockDiv = (clockControl & kSDHCRegClockControlFreqSelectLowMask) >> kSDHCRegClockControlFreqSelectLowShift;
+  if (getControllerVersion() >= kSDHostControllerVersion3_00) {
+    encodedClockDiv |= (clockControl & kSDHCRegClockControlFreqSelectHighMask) << kSDHCRegClockControlFreqSelectHighRhShift;
+  }
+  UInt32 clockDiv = encodedClockDiv == 0 ? 1 : encodedClockDiv << 1;
+  return (baseClock * MHz) / clockDiv;
+}
+
+bool EmeraldSDHCSlot::supportsHS200() {
+  UInt64 hcCaps = readReg64(kSDHCRegCapabilities);
+  return getControllerVersion() >= kSDHostControllerVersion3_00
+    && (hcCaps & kSDHCRegCapabilitiesEmbedded8BitSupported) != 0
+    && (hcCaps & kSDHCRegCapabilitiesVoltage1_8Supported) != 0
+    && (hcCaps & kSDHCRegCapabilitiesSDR104Supported) != 0;
+}
+
+bool EmeraldSDHCSlot::setControllerSignalVoltage1_8() {
+  if ((readReg64(kSDHCRegCapabilities) & kSDHCRegCapabilitiesVoltage1_8Supported) == 0) {
+    EMSYSLOG("Host controller does not advertise 1.8V support");
+    return false;
+  }
+
+  UInt16 clockControl = readReg16(kSDHCRegClockControl);
+  writeReg16(kSDHCRegClockControl, clockControl & ~kSDHCRegClockControlSDClockEnable);
+  IOSleep(1);
+
+  UInt16 hcControl2 = readReg16(kSDHCRegHostControl2) | kSDHCRegHostControl21_8VSignaling;
+  writeReg16(kSDHCRegHostControl2, hcControl2);
+  IOSleep(5);
+
+  bool enabled = (readReg16(kSDHCRegHostControl2) & kSDHCRegHostControl21_8VSignaling) != 0;
+  writeReg16(kSDHCRegClockControl, clockControl);
+  if (!enabled) {
+    EMSYSLOG("Host controller rejected 1.8V signaling");
+    return false;
+  }
+
+  EMDBGLOG("Host controller accepted 1.8V signaling");
   return true;
 }
 

@@ -50,6 +50,9 @@ public:
   }
   bool resetController(UInt8 bits);
   bool setControllerClock(UInt32 speedHz);
+  UInt32 getControllerClock();
+  bool supportsHS200();
+  bool setControllerSignalVoltage1_8();
   void setControllerPower(bool enabled);
   void setControllerBusWidth(SDABusWidth busWidth);
   void setControllerDMAMode(SDATransferType type);

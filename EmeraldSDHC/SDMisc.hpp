@@ -25,6 +25,7 @@
 #define kSDANormalSpeedClock25MHz       (25 * MHz)
 #define kSDANormalSpeedClock26MHz       (26 * MHz)
 #define kSDAHighSpeedClock25MHz         (50 * MHz)
+#define kSDAMMCHighSpeedClock52MHz      (52 * MHz)
 
 #define kSDAPowerStateOff   0
 #define kSDAPowerStateOn    1
