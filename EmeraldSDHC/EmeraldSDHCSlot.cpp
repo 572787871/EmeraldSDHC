@@ -214,17 +214,22 @@ bool EmeraldSDHCSlot::setControllerClock(UInt32 speedHz) {
   //
   // Calculate clock divisor.
   //
-  UInt32 clockDiv;
-  for (clockDiv = 1; (baseClock / clockDiv) > speedHz; clockDiv <<= 1);
-  EMDBGLOG("Clock will be set to %u %s using divisor %u",
-           speedHz >= MHz ? (baseClock / clockDiv) / MHz : (baseClock / clockDiv) / kHz,
-           speedHz >= MHz ? "MHz" : "kHz", clockDiv);
+  //
+  // SDHCI: FREQ_SEL stores half of the real divisor. The original code wrote
+  // the divisor directly, halving the actual card clock (a 200 MHz request
+  // produced 100 MHz).
+  //
+  UInt32 clockDiv = 1;
+  for (clockDiv = 1; clockDiv < 4096 && (baseClock / clockDiv) > speedHz; clockDiv <<= 1);
+  UInt32 encodedClockDiv = clockDiv >> 1;
+  EMDBGLOG("Clock request %u Hz -> actual %u Hz (divisor %u, encoded %u)",
+           speedHz, baseClock / clockDiv, clockDiv, encodedClockDiv);
 
   //
   // Set clock divisor and start SD clock.
   //
-  UInt16 newClockDiv = ((clockDiv << kSDHCRegClockControlFreqSelectLowShift) & kSDHCRegClockControlFreqSelectLowMask)
-    | ((clockDiv >> kSDHCRegClockControlFreqSelectHighRhShift) & kSDHCRegClockControlFreqSelectHighMask);
+  UInt16 newClockDiv = ((encodedClockDiv << kSDHCRegClockControlFreqSelectLowShift) & kSDHCRegClockControlFreqSelectLowMask)
+    | ((encodedClockDiv >> kSDHCRegClockControlFreqSelectHighRhShift) & kSDHCRegClockControlFreqSelectHighMask);
   writeReg16(kSDHCRegClockControl, readReg16(kSDHCRegClockControl) | newClockDiv);
   writeReg16(kSDHCRegClockControl, readReg16(kSDHCRegClockControl) | kSDHCRegClockControlSDClockEnable);
   EMDBGLOG("Clock control register is now 0x%X", readReg16(kSDHCRegClockControl));
